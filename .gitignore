@@ -1,0 +1,12 @@
+node_modules/
+.env
+*.db
+*.sqlite
+dist/
+frontend/dist/
+frontend/node_modules/
+auth_info*/
+sessions/
+logs/
+*.log
+.DS_Store
