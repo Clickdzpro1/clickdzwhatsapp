@@ -53,6 +53,9 @@ sudo -u postgres psql -c "CREATE USER $DB_USER WITH PASSWORD '$DB_PASS';" 2>/dev
 sudo -u postgres psql -c "CREATE DATABASE $DB_NAME OWNER $DB_USER;" 2>/dev/null || true
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE $DB_NAME TO $DB_USER;" 2>/dev/null || true
 sudo -u postgres psql -d $DB_NAME -c "GRANT ALL ON SCHEMA public TO $DB_USER;" 2>/dev/null || true
+# Create extensions as superuser (required before migration)
+sudo -u postgres psql -d $DB_NAME -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";' 2>/dev/null || true
+sudo -u postgres psql -d $DB_NAME -c 'CREATE EXTENSION IF NOT EXISTS "pgcrypto";' 2>/dev/null || true
 echo "  PostgreSQL ready: $DB_NAME"
 
 # ─── 4. Install Redis ───────────────────────────────────────
@@ -120,13 +123,17 @@ echo "  .env created"
 
 # Install backend dependencies
 cd $APP_DIR
-npm ci --production > /dev/null 2>&1
+npm install --omit=dev 2>&1 | tail -3
 echo "  Backend dependencies installed"
 
 # Install frontend dependencies and build
 cd $APP_DIR/frontend
-npm install > /dev/null 2>&1
-npm run build > /dev/null 2>&1
+npm install 2>&1 | tail -3
+npm run build 2>&1 | tail -5
+if [ ! -d "$APP_DIR/frontend/dist" ]; then
+  echo "  ERROR: Frontend build failed! Check output above."
+  exit 1
+fi
 echo "  Frontend built"
 
 # ─── 6. Run Database Migrations ─────────────────────────────
@@ -145,7 +152,7 @@ upstream clickdz_api {
 
 server {
     listen 80;
-    server_name $VPS_IP;
+    server_name $VPS_IP _;
 
     # Security headers
     add_header X-Frame-Options "SAMEORIGIN" always;

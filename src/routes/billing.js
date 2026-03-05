@@ -63,7 +63,7 @@ router.post('/subscribe', authenticate, async (req, res, next) => {
 
       await query(
         `INSERT INTO payments (id, tenant_id, amount, currency, payment_method, status, metadata)
-         VALUES ($1, $2, $3, 'USD', 'slickpay', 'pending', $4)`,
+         VALUES ($1, $2, $3, 'DZD', 'slickpay', 'pending', $4)`,
         [paymentId, req.tenant.id, amount, JSON.stringify(paymentData)]
       );
 

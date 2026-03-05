@@ -14,12 +14,12 @@ echo "Pulling latest changes..."
 git pull origin claude/whatsapp-ai-assistant-X39pR
 
 echo "Installing dependencies..."
-npm ci --production > /dev/null 2>&1
+npm install --omit=dev 2>&1 | tail -3
 
 echo "Building frontend..."
 cd $APP_DIR/frontend
-npm install > /dev/null 2>&1
-npm run build > /dev/null 2>&1
+npm install 2>&1 | tail -3
+npm run build 2>&1 | tail -5
 
 echo "Running migrations..."
 cd $APP_DIR
