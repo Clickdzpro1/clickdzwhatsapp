@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e
 
 # ============================================
 # ClickDz WhatsApp — Update Script
@@ -26,7 +25,12 @@ cd $APP_DIR
 node migrations/run.js
 
 echo "Restarting app..."
-pm2 restart clickdz-whatsapp
+if pm2 describe clickdz-whatsapp > /dev/null 2>&1; then
+  pm2 restart clickdz-whatsapp
+else
+  echo "  PM2 process not found, running fix.sh..."
+  bash "$APP_DIR/fix.sh"
+fi
 
 echo "Update complete! App is running."
 pm2 status
