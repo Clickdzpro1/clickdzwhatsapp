@@ -1,6 +1,13 @@
 import React, { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { Bot, Mail, Lock, ArrowRight, MessageSquare, Brain, Zap } from 'lucide-react';
+
+const features = [
+  { icon: MessageSquare, text: 'Unlimited WhatsApp conversations' },
+  { icon: Brain, text: 'AI auto-replies powered by Gemini' },
+  { icon: Zap, text: 'Human takeover in one click' },
+];
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -26,26 +33,96 @@ export default function LoginPage() {
 
   return (
     <div className="auth-page">
-      <div className="auth-card">
-        <h1>Welcome Back</h1>
-        <p>Sign in to your ClickDz WhatsApp dashboard</p>
-        {error && <div style={{ color: 'var(--danger)', marginBottom: 16, fontSize: 14 }}>{error}</div>}
-        <form onSubmit={handleSubmit}>
-          <div className="form-group">
-            <label>Email</label>
-            <input type="email" value={email} onChange={e => setEmail(e.target.value)} required placeholder="you@example.com" />
+      <div style={{ display: 'flex', gap: 60, alignItems: 'center', width: '100%', maxWidth: 860, position: 'relative', zIndex: 1 }}>
+        {/* Left panel */}
+        <div style={{ flex: 1, display: 'none' }} className="auth-left-panel">
+          <div style={{ marginBottom: 24 }}>
+            <div className="sidebar-brand-icon" style={{ width: 48, height: 48, marginBottom: 16 }}>
+              <Bot size={24} color="white" />
+            </div>
+            <h2 style={{ fontSize: 28, fontWeight: 800, letterSpacing: -1, marginBottom: 8 }}>
+              WhatsApp, <span className="text-green">Supercharged.</span>
+            </h2>
+            <p style={{ color: 'var(--text-secondary)', fontSize: 15, lineHeight: 1.6 }}>
+              Automate customer conversations with AI. Never miss a lead again.
+            </p>
           </div>
-          <div className="form-group">
-            <label>Password</label>
-            <input type="password" value={password} onChange={e => setPassword(e.target.value)} required placeholder="Your password" />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {features.map(f => (
+              <div key={f.text} style={{ display: 'flex', alignItems: 'center', gap: 12, color: 'var(--text-secondary)', fontSize: 14 }}>
+                <div style={{ width: 32, height: 32, background: 'var(--green-glow)', border: '1px solid rgba(37,211,102,0.2)', borderRadius: 8, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <f.icon size={15} color="var(--green)" />
+                </div>
+                {f.text}
+              </div>
+            ))}
           </div>
-          <button type="submit" className="btn btn-primary" style={{ width: '100%', justifyContent: 'center', padding: 12 }} disabled={loading}>
-            {loading ? 'Signing in...' : 'Sign In'}
-          </button>
-        </form>
-        <p style={{ marginTop: 16, textAlign: 'center', fontSize: 14 }}>
-          No account yet? <Link to="/register">Create one</Link>
-        </p>
+        </div>
+
+        {/* Auth card */}
+        <div className="auth-card" style={{ flex: '0 0 400px' }}>
+          <div className="auth-logo">
+            <div className="auth-logo-icon">
+              <Bot size={28} color="white" />
+            </div>
+            <h1>Welcome back</h1>
+            <p>Sign in to your AI dashboard</p>
+          </div>
+
+          {error && (
+            <div className="alert alert-danger" style={{ marginBottom: 16 }}>
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit}>
+            <div className="form-group">
+              <label className="form-label">Email</label>
+              <div style={{ position: 'relative' }}>
+                <Mail size={15} style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                <input
+                  className="input"
+                  type="email"
+                  value={email}
+                  onChange={e => setEmail(e.target.value)}
+                  required
+                  placeholder="you@example.com"
+                  style={{ paddingLeft: 34 }}
+                />
+              </div>
+            </div>
+            <div className="form-group" style={{ marginBottom: 20 }}>
+              <label className="form-label">Password</label>
+              <div style={{ position: 'relative' }}>
+                <Lock size={15} style={{ position: 'absolute', left: 11, top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                <input
+                  className="input"
+                  type="password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  required
+                  placeholder="Your password"
+                  style={{ paddingLeft: 34 }}
+                />
+              </div>
+            </div>
+            <button
+              type="submit"
+              className="btn btn-primary btn-lg"
+              style={{ width: '100%', justifyContent: 'center' }}
+              disabled={loading}
+            >
+              {loading ? <span className="loading-spinner" style={{ width: 18, height: 18 }} /> : <>Sign In <ArrowRight size={16} /></>}
+            </button>
+          </form>
+
+          <p style={{ marginTop: 20, textAlign: 'center', fontSize: 13.5, color: 'var(--text-secondary)' }}>
+            No account?{' '}
+            <Link to="/register" style={{ color: 'var(--green)', fontWeight: 600, textDecoration: 'none' }}>
+              Start free trial
+            </Link>
+          </p>
+        </div>
       </div>
     </div>
   );

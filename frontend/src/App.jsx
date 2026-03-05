@@ -8,12 +8,18 @@ import ConversationsPage from './pages/ConversationsPage';
 import DashboardPage from './pages/DashboardPage';
 import ContactsPage from './pages/ContactsPage';
 import KnowledgeBasePage from './pages/KnowledgeBasePage';
+import TemplatesPage from './pages/TemplatesPage';
 import SettingsPage from './pages/SettingsPage';
 import WhatsAppSetupPage from './pages/WhatsAppSetupPage';
+import BillingPage from './pages/BillingPage';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
-  if (loading) return <div className="empty-state">Loading...</div>;
+  if (loading) return (
+    <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)' }}>
+      <div className="loading-spinner" />
+    </div>
+  );
   if (!user) return <Navigate to="/login" />;
   return children;
 }
@@ -33,8 +39,10 @@ export default function App() {
                 <Route path="/conversations" element={<ConversationsPage />} />
                 <Route path="/contacts" element={<ContactsPage />} />
                 <Route path="/knowledge-base" element={<KnowledgeBasePage />} />
-                <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/templates" element={<TemplatesPage />} />
                 <Route path="/whatsapp-setup" element={<WhatsAppSetupPage />} />
+                <Route path="/billing" element={<BillingPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </Layout>
           </ProtectedRoute>
