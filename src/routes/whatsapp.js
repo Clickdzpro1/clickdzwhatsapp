@@ -10,7 +10,17 @@ router.use(authenticate, checkTenantActive);
 // POST /api/whatsapp/connect — start bridge and get QR
 router.post('/connect', async (req, res, next) => {
   try {
-    const bridge = await bridgeManager.startBridge(req.tenant.id);
+    let bridge;
+    try {
+      bridge = await bridgeManager.startBridge(req.tenant.id);
+    } catch (bridgeErr) {
+      // Bridge may fail to connect (network issues, etc.) but we can still check for QR
+      bridge = bridgeManager.getBridge(req.tenant.id);
+      if (!bridge) {
+        return res.status(503).json({ status: 'error', message: 'Failed to start WhatsApp bridge. Please try again.' });
+      }
+    }
+
     const status = bridge.getStatus();
 
     if (status === 'connected') {
@@ -18,10 +28,10 @@ router.post('/connect', async (req, res, next) => {
     }
 
     // Wait briefly for QR code
-    let qr = bridge.getQR();
+    let qr = await bridge.getQR();
     if (!qr) {
       await new Promise(resolve => setTimeout(resolve, 3000));
-      qr = bridge.getQR();
+      qr = await bridge.getQR();
     }
 
     if (qr) {
@@ -29,7 +39,7 @@ router.post('/connect', async (req, res, next) => {
       return res.json({ status: 'qr_ready', qr: qrDataUrl });
     }
 
-    res.json({ status: bridge.getStatus(), message: 'Connecting...' });
+    res.json({ status: bridge.getStatus(), message: 'Connecting... Please retry in a few seconds to get QR code.' });
   } catch (err) {
     next(err);
   }
