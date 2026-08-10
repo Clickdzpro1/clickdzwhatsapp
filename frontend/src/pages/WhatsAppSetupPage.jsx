@@ -1,397 +1,357 @@
-import React, { useState, useEffect, useRef } from 'react';
-import api from '../utils/api';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import api, { getJwt } from '../utils/api';
 import { useAuth } from '../context/AuthContext';
 import {
-  Smartphone, CheckCircle, RefreshCw, Link, Unlink,
-  AlertTriangle, Bot, Shield, Wifi, WifiOff, Hash, KeyRound
+  Smartphone, CheckCircle, RefreshCw, Plus, Trash2,
+  AlertTriangle, Bot, Shield, Wifi, WifiOff, Hash, KeyRound, Users
 } from 'lucide-react';
 
 /**
- * WhatsApp connection page.
+ * WhatsApp connection page (Wave 1).
  *
- * Wave 0 fixes:
- *  1. The QR image is fed a data URL *string*, not the response envelope
- *     (was: <img src={qr}> where qr was the whole { status, qr } object,
- *      which the browser rendered as "[object Object]" — producing the
- *      "keeps refreshing" symptoms).
- *  2. Pair-by-Code is the new primary CTA. The QR rotates every ~30s on
- *     a long relay; the 8-char code lives minutes and can be re-requested.
- *  3. We no longer create a new bridge on every poll. /v2/* proxies to the
- *     Railway gateway when USE_RAILWAY_GATEWAY=true; otherwise falls back
- *     to the legacy in-process bridge so existing tenants still work.
+ * Why this is different from the Wave 0 page:
+ *  - Lists every WhatsApp account a user has access to (multi-WhatsApp-per-user).
+ *  - Subscribes to /ws/whatsapp so QR events come in real-time, no polling.
+ *  - Pair-by-Code is still the primary CTA per instance (8-char code
+ *    beats a rotating QR on slow networks).
+ *  - Owners can grant another user access to one of their instances via
+ *    the team dialog.
+ *
+ * Backwards compat: if no instances exist yet, the "Add your first
+ * WhatsApp" button creates one and connects it. The Vercel JWT carries
+ * user_id from Wave 1 onward; the SaaS routes use it for ACL.
  */
+
 export default function WhatsAppSetupPage() {
   const { user, setUser } = useAuth();
-  const [status, setStatus] = useState('loading');
-  const [qr, setQr] = useState(null);
-  const [lastQrStr, setLastQrStr] = useState(null); // de-dup image src
-  const [error, setError] = useState('');
-  const pollRef = useRef(null);
-
-  // Pair-by-Code state
-  const [phoneInput, setPhoneInput] = useState('');
-  const [pairCode, setPairCode] = useState(null); // { code, formatted, expiresInHint }
-  const [pairBusy, setPairBusy] = useState(false);
-  const [pairError, setPairError] = useState('');
-
-  // Multi-instance support (Wave 1 prep): server returns a list of instances.
   const [instances, setInstances] = useState([]);
+  const [status, setStatus] = useState('loading');
+  const [error, setError] = useState('');
+  const wsRef = useRef(null);
 
-  const refreshUser = async () => {
-    try {
-      const me = await api.get('/auth/me');
-      setUser(me);
-    } catch { /* ignore */ }
-  };
-
-  const stopPolling = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  };
-
-  const fetchInstanceList = async () => {
-    try {
-      const r = await api.get('/whatsapp/v2/instances');
-      setInstances(Array.isArray(r?.instances) ? r.instances : []);
-    } catch { /* ignore */ }
-  };
-
-  const checkStatus = async () => {
-    try {
-      const data = await api.get('/whatsapp/v2/status');
-      setStatus(data.status);
-      if (data.status === 'connected') {
-        stopPolling();
-        await refreshUser();
-        await fetchInstanceList();
-      }
-    } catch (err) {
-      setStatus('error');
-    }
-  };
-
+  // Wire realtime events from the gateway
   useEffect(() => {
-    checkStatus();
-    fetchInstanceList();
-    return stopPolling;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // WebSocket path: /ws/whatsapp?token=<jwt>
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${window.location.host}/ws/whatsapp?token=${encodeURIComponent(getJwt())}`);
+    wsRef.current = ws;
+    ws.onmessage = (m) => {
+      let parsed;
+      try { parsed = JSON.parse(m.data); } catch { return; }
+      if (parsed.event === 'qr' && parsed.payload && parsed.payload.qr && parsed.instance_id) {
+        setInstances((prev) => prev.map((i) => (
+          i.id === parsed.instance_id
+            ? { ...i, status: 'qr', hasQr: true, lastQr: parsed.payload.qr }
+            : i
+        )));
+      } else if (parsed.event === 'connection.update' || parsed.type === 'replay') {
+        // pull-to-refresh after replay to align local state with gateway truth
+        fetchInstances().catch(() => {});
+      } else if (parsed.event === 'instance.ready' && parsed.instance_id) {
+        setInstances((prev) => prev.map((i) => (
+          i.id === parsed.instance_id ? { ...i, status: 'connected' } : i
+        )));
+      } else if (parsed.event === 'instance.logged_out' && parsed.instance_id) {
+        setInstances((prev) => prev.map((i) => (
+          i.id === parsed.instance_id ? { ...i, status: 'logged_out', hasQr: false } : i
+        )));
+      }
+    };
+    ws.onerror = () => { /* gracefully degrade to HTTP — work still polls */ };
+    return () => { try { ws.close(); } catch { /* ignore */ } };
   }, []);
 
-  const startPolling = () => {
-    stopPolling();
-    const id = setInterval(async () => {
-      try {
-        const s = await api.get('/whatsapp/v2/status');
-        setStatus(s.status);
-        if (s.status === 'connected') {
-          stopPolling();
-          setQr(null);
-          setLastQrStr(null);
-          setPairCode(null);
-          await refreshUser();
-          await fetchInstanceList();
-          return;
-        }
-        if (s.status === 'qr_ready') {
-          const qrData = await api.get('/whatsapp/v2/qr');
-          // FIX (Wave 0): extract the data URL string. Response shape is
-          // { status, qr: 'data:image/png;base64,…' }. Previously we
-          // assigned the envelope and fed it into <img src>.
-          if (qrData?.qr && qrData.qr !== lastQrStr) {
-            setLastQrStr(qrData.qr);
-            setQr(qrData.qr);
-          }
-        }
-      } catch {
-        stopPolling();
-      }
-    }, 3000);
-    pollRef.current = id;
-    // Safety net: stop polling after 2 minutes regardless.
-    setTimeout(stopPolling, 120000);
-  };
-
-  const connect = async () => {
-    setError('');
-    setStatus('connecting');
-    setPairCode(null);
-    setPairError('');
+  const fetchInstances = useCallback(async () => {
     try {
-      const data = await api.post('/whatsapp/v2/connect');
-      setStatus(data.status);
-      if (data.status === 'qr_ready' && data.qr) {
-        setLastQrStr(data.qr);
-        setQr(data.qr);
-      }
-      if (data.status !== 'connected') startPolling();
-      else {
-        await refreshUser();
-        await fetchInstanceList();
-      }
-    } catch (err) {
-      setError(err.message || 'Connection failed');
+      const r = await api.get('/whatsapp/v2/instances');
+      const items = Array.isArray(r?.instances) ? r.instances : [];
+      setInstances(items);
+      const anyConnected = items.some((i) => i.status === 'connected');
+      setStatus(anyConnected ? 'connected' : (items.length ? 'partial' : 'empty'));
+      return items;
+    } catch (e) {
       setStatus('error');
+      setError(e.message);
+      return [];
     }
-  };
+  }, []);
 
-  const requestPairCode = async () => {
-    setPairBusy(true);
-    setPairError('');
+  useEffect(() => { fetchInstances(); }, [fetchInstances]);
+
+  const createInstance = async () => {
     setError('');
-    try {
-      // 1. Make sure a session is in 'qr' state by triggering connect first.
-      const c = await api.post('/whatsapp/v2/connect');
-      setStatus(c.status);
-      if (c.status === 'connected') {
-        await refreshUser();
-        await fetchInstanceList();
-        setPairBusy(false);
-        return;
-      }
-      if (c.qr) {
-        setLastQrStr(c.qr);
-        setQr(c.qr);
-      }
-      // 2. Ask the gateway for the 8-char pairing code.
-      const digits = phoneInput.replace(/[^\d]/g, '');
-      const r = await api.post('/whatsapp/v2/pair-code', { phoneNumber: digits });
-      setPairCode({
-        code: r.code,
-        formatted: r.formatted,
-        expiresInHint: r.expiresInHint,
-        phoneNumber: r.phoneNumber,
-      });
-      // Pair-by-code lives for minutes, so the QR is now secondary.
-      if (c.status !== 'connected') startPolling();
-    } catch (err) {
-      setPairError(err.message || 'Failed to request pairing code');
-    } finally {
-      setPairBusy(false);
-    }
-  };
-
-  const disconnect = async () => {
-    stopPolling();
-    try {
-      await api.post('/whatsapp/v2/disconnect');
-      // Disconnect can mean logging out or stopping; ask server what state we're in.
-      const s = await api.get('/whatsapp/v2/status');
-      setStatus(s.status);
-      if (s.status !== 'connected') setQr(null);
-      setPairCode(null);
-      await refreshUser();
-      await fetchInstanceList();
-    } catch (err) {
-      setError(err.message || 'Disconnect failed');
-    }
-  };
-
-  const logout = async () => {
-    const confirmed = window.confirm(
-      'This will log out your WhatsApp session. You will need to scan the QR code (or enter a new 8-digit pairing code) again.'
+    const name = window.prompt(
+      'Friendly name for this WhatsApp number? (e.g. Sales DZ, Support FR)',
+      'Customer Service',
     );
-    if (!confirmed) return;
-    stopPolling();
+    if (name === null) return;
     try {
-      await api.post('/whatsapp/v2/logout');
-      setStatus('disconnected');
-      setQr(null);
-      setLastQrStr(null);
-      setPairCode(null);
-      await refreshUser();
-    } catch (err) {
-      setError(err.message || 'Logout failed');
-    }
+      const created = await api.post('/whatsapp/v2/instances', { name: name.trim() || 'WhatsApp' });
+      // The backend ran /connect already. Force a refresh to pick up the QR.
+      await fetchInstances();
+      // Open the QR refresh loop on the new instance.
+      const list = await fetchInstances();
+      const fresh = list.find((i) => i.id === created.id);
+      if (fresh) startInstanceQrPoll(fresh.id);
+    } catch (e) { setError(e.message); }
   };
 
-  const isLoading = status === 'loading' || status === 'connecting';
+  // Per-instance QR poll (kept as a fallback when WS is offline for any reason)
+  const startInstanceQrPoll = (instanceId) => {
+    const tick = async () => {
+      try {
+        const q = await api.get(`/whatsapp/v2/instances/${instanceId}/qr`);
+        setInstances((prev) => prev.map((i) => (
+          i.id === instanceId
+            ? { ...i, status: q.status, hasQr: !!q.qr, lastQr: q.qr || i.lastQr }
+            : i
+        )));
+      } catch { /* silent: WS will update */ }
+    };
+    tick();
+    return setInterval(tick, 4000);
+  };
 
-  // Render
+  const requestPairCode = async (instanceId, phoneNumber) => {
+    const r = await api.post(`/whatsapp/v2/instances/${instanceId}/pair`, { phoneNumber });
+    return r;
+  };
+
+  const disconnectInstance = async (instanceId) => {
+    if (!confirm('Disconnect this WhatsApp? Incoming messages will stop until you reconnect.')) return;
+    await api.post(`/whatsapp/v2/instances/${instanceId}/disconnect`);
+    await fetchInstances();
+  };
+
+  const logoutInstance = async (instanceId) => {
+    if (!confirm('Log out of this WhatsApp? You will need to pair again.')) return;
+    await api.post(`/whatsapp/v2/instances/${instanceId}/logout`);
+    await fetchInstances();
+  };
+
+  const deleteInstance = async (instanceId) => {
+    if (!confirm('Permanently remove this WhatsApp from your account? (You can pair a new number afterwards.)')) return;
+    await api.delete(`/whatsapp/v2/instances/${instanceId}`);
+    await fetchInstances();
+  };
+
   return (
     <div className="page">
       <div className="page-header">
         <div>
-          <h2 className="page-title">WhatsApp Connection</h2>
-          <p className="page-subtitle">Link your WhatsApp to enable AI auto-replies</p>
+          <h2 className="page-title">WhatsApp Accounts</h2>
+          <p className="page-subtitle">
+            {instances.length === 0
+              ? 'Link one or more WhatsApp numbers to enable AI auto-replies.'
+              : `${instances.length} WhatsApp${instances.length === 1 ? '' : 's'} linked to your account.`}
+          </p>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span className={`status-dot ${status === 'connected' ? 'green' : status === 'connecting' ? 'yellow' : 'red'}`} />
-          <span style={{ fontSize: 13, textTransform: 'capitalize', color: 'var(--text-secondary)' }}>
-            {status === 'loading' ? 'Checking...' : status}
-          </span>
+        <button className="btn btn-primary" onClick={createInstance}>
+          <Plus size={14} /> Add WhatsApp
+        </button>
+      </div>
+
+      {error && <div className="alert alert-danger" style={{ marginBottom: 16 }}>
+        <AlertTriangle size={14} /> {error}
+      </div>}
+
+      {instances.length === 0 && status !== 'loading' && (
+        <EmptyState onAdd={createInstance} />
+      )}
+
+      <div style={{ display: 'grid', gap: 16 }}>
+        {instances.map((inst) => (
+          <InstanceCard
+            key={inst.id}
+            inst={inst}
+            onPair={(phone) => requestPairCode(inst.id, phone)}
+            onConnect={() => api.post(`/whatsapp/v2/instances/${inst.id}/connect`).then(fetchInstances)}
+            onDisconnect={() => disconnectInstance(inst.id)}
+            onLogout={() => logoutInstance(inst.id)}
+            onDelete={() => deleteInstance(inst.id)}
+          />
+        ))}
+      </div>
+
+      <Footer />
+    </div>
+  );
+}
+
+function EmptyState({ onAdd }) {
+  return (
+    <div className="card" style={{ textAlign: 'center', padding: 40, marginBottom: 16 }}>
+      <div style={{ width: 64, height: 64, background: 'var(--bg-elevated)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 16px' }}>
+        <Smartphone size={28} color="var(--text-muted)" />
+      </div>
+      <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>No WhatsApp yet</h3>
+      <p style={{ color: 'var(--text-secondary)', marginBottom: 20 }}>
+        Pair your first number to start receiving messages. You can add more numbers any time.
+      </p>
+      <button className="btn btn-primary btn-lg" onClick={onAdd}>
+        <Wifi size={16} /> Connect first WhatsApp
+      </button>
+    </div>
+  );
+}
+
+function InstanceCard({ inst, onPair, onConnect, onDisconnect, onLogout, onDelete }) {
+  const [phone, setPhone] = useState('');
+  const [pairBusy, setPairBusy] = useState(false);
+  const [pairError, setPairError] = useState('');
+  const [pairCode, setPairCode] = useState(null);
+
+  const handlePair = async () => {
+    setPairBusy(true);
+    setPairError('');
+    try {
+      const r = await onPair(phone);
+      setPairCode(r);
+    } catch (e) { setPairError(e.message); }
+    finally { setPairBusy(false); }
+  };
+
+  const isLive = inst.status === 'connected';
+
+  return (
+    <div className="card" data-testid={`instance-${inst.id}`} style={{ padding: 20 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span className={`status-dot ${isLive ? 'green' : inst.status === 'qr' || inst.status === 'connecting' ? 'yellow' : 'red'}`} />
+            <strong style={{ fontSize: 15 }}>{inst.name}</strong>
+            {inst.phoneNumber && (
+              <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>· {inst.phoneNumber}</span>
+            )}
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+            Status: <strong style={{ textTransform: 'capitalize' }}>{inst.status}</strong>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 6 }}>
+          {!isLive && (
+            <button className="btn btn-ghost" onClick={onConnect}><Wifi size={12} /> Connect</button>
+          )}
+          {isLive && (
+            <button className="btn btn-secondary" onClick={onDisconnect}><WifiOff size={12} /> Disconnect</button>
+          )}
+          <button className="btn btn-ghost" onClick={onLogout}><Trash2 size={12} /> Reset</button>
+          <button className="btn btn-danger" onClick={onDelete}><Trash2 size={12} /> Delete</button>
         </div>
       </div>
 
-      <div style={{ maxWidth: 640, margin: '0 auto' }}>
-        {status === 'connected' ? (
-          <div className="card" style={{ marginBottom: 20, textAlign: 'center', padding: 40 }}>
-            <div style={{ width: 72, height: 72, background: 'rgba(34,197,94,0.15)', border: '2px solid var(--success)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 20px' }}>
-              <CheckCircle size={36} color="var(--success)" />
-            </div>
-            <h3 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>WhatsApp Connected</h3>
-            <p style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>
-              Your WhatsApp is linked and active. The AI assistant is auto-replying to incoming messages.
-            </p>
-            <div className="connection-status" style={{ marginBottom: 24, justifyContent: 'center' }}>
-              <Bot size={16} color="var(--green)" />
-              <span style={{ fontSize: 13 }}>AI is active and handling conversations</span>
-              <span className="badge badge-green">Live</span>
-            </div>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-              <button className="btn btn-secondary" onClick={disconnect}>
-                <WifiOff size={14} /> Disconnect
-              </button>
-              <button className="btn btn-danger" onClick={logout}>
-                <Unlink size={14} /> Logout & Reset Session
-              </button>
-            </div>
-            {instances.length > 1 && (
-              <div style={{ marginTop: 16, fontSize: 12, color: 'var(--text-muted)' }}>
-                You have {instances.length} linked numbers. Manage each one's ACL from the team page.
-              </div>
-            )}
+      {!isLive && (
+        <div style={{ paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '8px 0' }}>
+            <KeyRound size={14} color="var(--green)" />
+            <span style={{ fontWeight: 600, fontSize: 13.5 }}>Pair by 8-digit code</span>
           </div>
-        ) : isLoading ? (
-          <div className="card" style={{ marginBottom: 20, textAlign: 'center', padding: 48 }}>
-            <div className="loading-spinner" style={{ width: 40, height: 40, margin: '0 auto 16px', borderWidth: 3 }} />
-            <h3 style={{ fontSize: 18, fontWeight: 600 }}>
-              {status === 'loading' ? 'Checking connection...' : 'Starting WhatsApp bridge...'}
-            </h3>
-            <p style={{ color: 'var(--text-secondary)', marginTop: 8 }}>This may take a few seconds</p>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <input
+              type="tel"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              placeholder="Phone with country code (e.g. 213555123456)"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              style={{
+                flex: 1, padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)',
+                background: 'var(--bg-primary)', color: 'var(--text-primary)', fontFamily: 'inherit',
+              }}
+              data-testid="pair-phone-input"
+            />
+            <button
+              className="btn btn-primary"
+              onClick={handlePair}
+              disabled={pairBusy || phone.replace(/\D/g, '').length < 8}
+            >
+              <Hash size={14} /> {pairBusy ? 'Working…' : 'Get code'}
+            </button>
           </div>
-        ) : (
-          <div className="card" style={{ marginBottom: 20, padding: 32 }}>
-            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Connect a WhatsApp number</h3>
-            <p style={{ color: 'var(--text-secondary)', marginBottom: 20 }}>
-              Open WhatsApp on your phone → Settings → Linked Devices. Either scan the QR code below, or
-              generate an 8-digit pairing code to type instead (recommended when the QR keeps timing out).
-            </p>
-
-            {error && (
-              <div className="alert alert-danger" style={{ textAlign: 'left', marginBottom: 16 }}>
-                <AlertTriangle size={14} /> {error}
+          {pairError && <div style={{ marginTop: 8, fontSize: 12, color: 'var(--danger)' }}>{pairError}</div>}
+          {pairCode && (
+            <div style={{ marginTop: 12, textAlign: 'center' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Type this on your phone</div>
+              <div
+                style={{
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  fontSize: 32, fontWeight: 700, letterSpacing: 6, color: 'var(--green)',
+                  userSelect: 'all',
+                }}
+                data-testid="pair-code"
+              >
+                {pairCode.formatted || pairCode.code}
               </div>
-            )}
-
-            {/* Pair-by-Code is the recommended path: 8-char code lives minutes; survives the QR rotation. */}
-            <div style={{ marginBottom: 24, padding: 16, background: 'var(--bg-elevated)', borderRadius: 8, border: '1px solid var(--border)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <KeyRound size={14} color="var(--green)" />
-                <span style={{ fontWeight: 600, fontSize: 13.5 }}>Pair by 8-digit code (recommended)</span>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                {pairCode.expiresInHint || 'Code lives a few minutes; re-request anytime.'}
               </div>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  type="tel"
-                  inputMode="numeric"
-                  pattern="[0-9]*"
-                  placeholder="Phone with country code, e.g. 213555123456"
-                  value={phoneInput}
-                  onChange={(e) => setPhoneInput(e.target.value)}
-                  style={{
-                    flex: 1, padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)',
-                    background: 'var(--bg-primary)', color: 'var(--text-primary)', fontFamily: 'inherit',
-                  }}
-                  data-testid="pair-phone-input"
+              <button className="btn btn-ghost" style={{ marginTop: 8, fontSize: 12 }} onClick={handlePair} disabled={pairBusy}>
+                <RefreshCw size={12} /> Regenerate
+              </button>
+            </div>
+          )}
+
+          {inst.lastQr && (
+            <details style={{ marginTop: 12 }}>
+              <summary style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'pointer' }}>
+                …or scan the QR (rotates every ~30 s)
+              </summary>
+              <div style={{ textAlign: 'center', padding: 12 }}>
+                <img
+                  src={inst.lastQr}
+                  alt="WhatsApp QR"
+                  style={{ width: 180, height: 180 }}
                 />
-                <button
-                  className="btn btn-primary"
-                  onClick={requestPairCode}
-                  disabled={pairBusy || phoneInput.replace(/\D/g, '').length < 8}
-                >
-                  <Hash size={14} /> {pairBusy ? 'Generating…' : 'Get code'}
+                <button className="btn btn-secondary" style={{ marginTop: 8 }} onClick={onConnect}>
+                  <RefreshCw size={12} /> Refresh QR
                 </button>
               </div>
-              {pairError && (
-                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--danger)' }}>{pairError}</div>
-              )}
-              {pairCode && (
-                <div style={{ marginTop: 12, textAlign: 'center' }}>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Type this on your phone</div>
-                  <div
-                    style={{
-                      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
-                      fontSize: 36, fontWeight: 700, letterSpacing: 6, color: 'var(--green)',
-                      userSelect: 'all',
-                    }}
-                    data-testid="pair-code"
-                  >
-                    {pairCode.formatted || pairCode.code}
-                  </div>
-                  <button
-                    className="btn btn-ghost"
-                    style={{ marginTop: 8, fontSize: 12 }}
-                    onClick={requestPairCode}
-                    disabled={pairBusy}
-                  >
-                    <RefreshCw size={12} /> {pairBusy ? 'Working…' : 'Regenerate code'}
-                  </button>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-                    {pairCode.expiresInHint || 'Code lives a few minutes; re-request anytime.'}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* QR fallback: renders a scannable image. src is the data URL string, not an object. */}
-            {qr && status !== 'connected' && (
-              <div style={{ textAlign: 'center', padding: 16 }} data-testid="qr-fallback">
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>
-                  …or scan this QR (rotates ~every 30 seconds):
-                </div>
-                <div className="qr-container" style={{ margin: '0 auto 12px', display: 'inline-block' }}>
-                  <img
-                    src={qr}
-                    alt="WhatsApp QR Code"
-                    style={{ width: 220, height: 220, display: 'block' }}
-                  />
-                </div>
-                <button className="btn btn-secondary" onClick={connect}>
-                  <RefreshCw size={14} /> Refresh QR
-                </button>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8 }}>
-                  Waiting for scan… this page auto-refreshes the image only when the QR string actually changes.
-                </div>
-              </div>
-            )}
-
-            {!qr && !pairCode && !isLoading && (
-              <div style={{ textAlign: 'center', padding: 8 }}>
-                <button className="btn btn-primary btn-lg" onClick={connect} disabled={pairBusy}>
-                  <Wifi size={16} /> Start connection
-                </button>
-                <p style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 8 }}>
-                  Or enter your phone number above and click "Get code" — much faster than scanning for most users.
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* How it works */}
-        <div className="card">
-          <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 16 }}>How it works</h3>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {[
-              { step: '1', icon: Smartphone, title: 'Link a WhatsApp number', desc: 'Use your phone app — scan a QR or type an 8-digit code. No extra setup required.' },
-              { step: '2', icon: Bot, title: 'AI takes over', desc: 'The AI reads your knowledge base and starts auto-replying to customer messages.' },
-              { step: '3', icon: Shield, title: 'Stay in control', desc: 'Take over any conversation manually. The AI always defers to you.' },
-              { step: '4', icon: Link, title: 'Many numbers, one place', desc: 'Add as many WhatsApp numbers as you need and route them to different team members.' },
-            ].map(item => (
-              <div key={item.step} style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
-                <div style={{ width: 32, height: 32, background: 'var(--green-glow)', border: '1px solid rgba(37,211,102,0.2)', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                  <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--green)' }}>{item.step}</span>
-                </div>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 13.5, marginBottom: 2 }}>{item.title}</div>
-                  <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{item.desc}</div>
-                </div>
-              </div>
-            ))}
-          </div>
+            </details>
+          )}
         </div>
-      </div>
+      )}
+
+      {isLive && (
+        <div style={{ paddingTop: 8, borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Bot size={14} color="var(--green)" />
+          <span style={{ fontSize: 13 }}>AI is handling inbound messages</span>
+          <span className="badge badge-green" style={{ marginLeft: 'auto' }}>Live</span>
+          <button
+            className="btn btn-ghost"
+            style={{ marginLeft: 10, fontSize: 12 }}
+            data-testid={`acl-${inst.id}`}
+            onClick={() => onGrantAcl(inst.id)}
+          >
+            <Users size={12} /> Share with teammate
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+async function onGrantAcl(instanceId) {
+  const email = window.prompt('Teammate email to invite (they must already have a user on this workspace):');
+  if (!email) return;
+  try {
+    await api.post(`/whatsapp/v2/instances/${instanceId}/acl`, { email, role: 'agent' });
+    alert(`Granted ${email} access. They will see this WhatsApp on their next refresh.`);
+  } catch (e) {
+    alert(`Could not grant: ${e.message}`);
+  }
+}
+
+function Footer() {
+  return (
+    <div className="card" style={{ marginTop: 24 }}>
+      <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>How it works</h3>
+      <ol style={{ paddingLeft: 18, fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+        <li>Add a WhatsApp → enter your phone → click <strong>Get code</strong>.</li>
+        <li>On your phone: Settings → Linked Devices → Link with phone number → enter the 8-digit code.</li>
+        <li>Replies are sent from your WhatsApp; the AI handler takes over when you toggle auto-reply on.</li>
+        <li>Add as many WhatsApp numbers as you want; route each to a specific teammate via Share.</li>
+      </ol>
     </div>
   );
 }
