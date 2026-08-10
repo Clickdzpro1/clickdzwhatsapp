@@ -74,8 +74,16 @@ class ApiClient {
 
   async del(path) {
     const res = await this.request(path, { method: 'DELETE' });
-    return res.json();
+    return res.json().catch(() => ({}));
   }
+}
+
+/**
+ * Returns the current JWT for use in non-fetch paths (e.g. WebSocket).
+ * The /ws endpoint on the backend accepts the JWT via `?token=` query.
+ */
+export function getJwt() {
+  return localStorage.getItem('token') || '';
 }
 
 export const api = new ApiClient();
