@@ -34,4 +34,15 @@ module.exports = {
     importMessageLimit: 20,  // last 20 messages per conversation
     importConversationLimit: 100, // max 100 conversations on first sync
   },
+
+  // Wave 0 — gateway proxy. Set USE_RAILWAY_GATEWAY=true on Vercel after
+  // we provision the per-tenant API keys; until then the SaaS falls back
+  // to the legacy in-process bridge and the QR loop symptoms continue.
+  gateway: {
+    enabled: String(process.env.USE_RAILWAY_GATEWAY || '').toLowerCase() === 'true',
+    baseUrl: process.env.GATEWAY_BASE_URL || '',
+    defaultApiKey: process.env.GATEWAY_API_KEY || '',
+    adminApiKey: process.env.GATEWAY_ADMIN_KEY || '',
+    requestTimeoutMs: parseInt(process.env.GATEWAY_TIMEOUT_MS || '10000'),
+  },
 };
